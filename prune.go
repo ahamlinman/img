@@ -3,22 +3,26 @@ package main
 import (
 	"context"
 	"fmt"
-	"github.com/spf13/cobra"
 	"os"
 	"text/tabwriter"
+	"time"
 
 	"github.com/containerd/containerd/namespaces"
 	"github.com/docker/go-units"
 	"github.com/genuinetools/img/client"
+	controlapi "github.com/moby/buildkit/api/services/control"
 	"github.com/moby/buildkit/identity"
 	"github.com/moby/buildkit/session"
+	"github.com/spf13/cobra"
 )
 
 const pruneUsageShortHelp = `Prune and clean up the build cache.`
 const pruneUsageLongHelp = `Prune and clean up the build cache.`
 
 func newPruneCommand() *cobra.Command {
-	prune := &pruneCommand{}
+	prune := &pruneCommand{
+		filters: newListValue(),
+	}
 
 	cmd := &cobra.Command{
 		Use:                   "prune [OPTIONS]",
@@ -32,10 +36,22 @@ func newPruneCommand() *cobra.Command {
 		},
 	}
 
+	fs := cmd.Flags()
+
+	fs.DurationVar(&prune.keepDuration, "keep-duration", 0, "Keep data newer than this limit")
+	fs.Float64Var(&prune.keepStorageMB, "keep-storage", 0, "Keep data below this limit (in MB)")
+	fs.VarP(prune.filters, "filter", "f", "Filter based on conditions provided")
+	fs.BoolVar(&prune.all, "all", false, "Include internal/frontend references")
+
 	return cmd
 }
 
-type pruneCommand struct{}
+type pruneCommand struct {
+	keepDuration  time.Duration
+	keepStorageMB float64
+	filters       *listValue
+	all           bool
+}
 
 func (cmd *pruneCommand) Run(args []string) (err error) {
 	reexec()
@@ -52,7 +68,12 @@ func (cmd *pruneCommand) Run(args []string) (err error) {
 	}
 	defer c.Close()
 
-	usage, err := c.Prune(ctx)
+	usage, err := c.Prune(ctx, &controlapi.PruneRequest{
+		Filter:       cmd.filters.GetAll(),
+		All:          cmd.all,
+		KeepDuration: int64(cmd.keepDuration),
+		KeepBytes:    int64(cmd.keepStorageMB * 1e6),
+	})
 	if err != nil {
 		return err
 	}
