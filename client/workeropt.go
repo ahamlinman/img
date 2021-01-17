@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"syscall"
@@ -70,6 +71,11 @@ func (c *Client) createWorkerOpt(withExecutor bool) (opt base.WorkerOpt, err err
 			Root:        filepath.Join(c.root, "executor"),
 			Rootless:    unprivileged,
 			ProcessMode: processMode(),
+		}
+
+		// TODO: Quick hack. This should probably be a Client option.
+		if rt, ok := os.LookupEnv("IMG_OCI_RUNTIME"); ok {
+			exeOpt.CommandCandidates = []string{rt}
 		}
 
 		np, err := netproviders.Providers(netproviders.Opt{Mode: "auto"})
