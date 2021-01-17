@@ -5,6 +5,7 @@ package oci
 import (
 	"context"
 	"path"
+	"strings"
 	"sync"
 
 	"github.com/containerd/containerd/containers"
@@ -117,11 +118,11 @@ func GenerateSpec(ctx context.Context, meta executor.Meta, mounts []executor.Mou
 		s.Linux.GIDMappings = specMapping(idmap.GIDs())
 	}
 
-	sm := &submounts{}
+	pm := &preparedMounts{}
 
 	var releasers []func() error
 	releaseAll := func() {
-		sm.cleanup()
+		pm.cleanup()
 		for _, f := range releasers {
 			f()
 		}
@@ -143,7 +144,7 @@ func GenerateSpec(ctx context.Context, meta executor.Meta, mounts []executor.Mou
 		}
 		releasers = append(releasers, release)
 		for _, mount := range mounts {
-			mount, err = sm.subMount(mount, m.Selector)
+			mount, err = pm.prepareMountForRuntime(mount, m.Selector)
 			if err != nil {
 				releaseAll()
 				return nil, nil, err
@@ -165,22 +166,23 @@ type mountRef struct {
 	unmount func() error
 }
 
-type submounts struct {
+type preparedMounts struct {
 	m map[uint64]mountRef
 }
 
-func (s *submounts) subMount(m mount.Mount, subPath string) (mount.Mount, error) {
-	if path.Join("/", subPath) == "/" {
+func (pm *preparedMounts) prepareMountForRuntime(m mount.Mount, subPath string) (mount.Mount, error) {
+	if canPassThroughToRuntime(m, subPath) {
 		return m, nil
 	}
-	if s.m == nil {
-		s.m = map[uint64]mountRef{}
+
+	if pm.m == nil {
+		pm.m = map[uint64]mountRef{}
 	}
 	h, err := hashstructure.Hash(m, nil)
 	if err != nil {
 		return mount.Mount{}, nil
 	}
-	if mr, ok := s.m[h]; ok {
+	if mr, ok := pm.m[h]; ok {
 		sm, err := sub(mr.mount, subPath)
 		if err != nil {
 			return mount.Mount{}, nil
@@ -202,7 +204,7 @@ func (s *submounts) subMount(m mount.Mount, subPath string) (mount.Mount, error)
 		}
 	}
 
-	s.m[h] = mountRef{
+	pm.m[h] = mountRef{
 		mount: mount.Mount{
 			Source:  mp,
 			Type:    "bind",
@@ -211,17 +213,17 @@ func (s *submounts) subMount(m mount.Mount, subPath string) (mount.Mount, error)
 		unmount: lm.Unmount,
 	}
 
-	sm, err := sub(s.m[h].mount, subPath)
+	sm, err := sub(pm.m[h].mount, subPath)
 	if err != nil {
 		return mount.Mount{}, err
 	}
 	return sm, nil
 }
 
-func (s *submounts) cleanup() {
+func (pm *preparedMounts) cleanup() {
 	var wg sync.WaitGroup
-	wg.Add(len(s.m))
-	for _, m := range s.m {
+	wg.Add(len(pm.m))
+	for _, m := range pm.m {
 		func(m mountRef) {
 			go func() {
 				m.unmount()
@@ -230,6 +232,19 @@ func (s *submounts) cleanup() {
 		}(m)
 	}
 	wg.Wait()
+}
+
+func canPassThroughToRuntime(m mount.Mount, subPath string) bool {
+	fuseTypePrefixes := []string{"fuse.", "fuse3."}
+	for _, ftp := range fuseTypePrefixes {
+		if strings.HasPrefix(m.Type, ftp) {
+			// OCI runtimes can't handle containerd FUSE mount types; always prepare a
+			// local mount
+			return false
+		}
+	}
+
+	return path.Join("/", subPath) == "/"
 }
 
 func sub(m mount.Mount, subPath string) (mount.Mount, error) {
